@@ -68,8 +68,9 @@ def inspect_workbook(file_bytes: bytes):
 
 
 query_file = st.file_uploader(
-    "1. Chọn file query giá",
+    "1. Chọn một hoặc nhiều file query giá",
     type=["xlsx"],
+    accept_multiple_files=True,
     max_upload_size=MAX_UPLOAD_MB,
 )
 target_date = st.date_input("2. Ngày kiểm tra", value=date.today(), format="DD/MM/YYYY")
@@ -218,7 +219,7 @@ if st.button(
         logger.exception("Could not create attribute workbook")
         st.error("Không thể tạo file Attribute do lỗi không mong muốn.")
 
-can_process = query_file is not None and bool(selections)
+can_process = bool(query_file) and bool(selections)
 if st.button("Xử lý và tạo file kết quả", type="primary", disabled=not can_process):
     missing_sites = [
         f"{item['file_name']} / {item['region']}"
@@ -230,7 +231,11 @@ if st.button("Xử lý và tạo file kết quả", type="primary", disabled=not
     else:
         try:
             with st.spinner("Đang đọc query và đối chiếu giá..."):
-                query = read_effective_query(query_file.getvalue(), target_date)
+                query_frames = [
+                    read_effective_query(uploaded_query.getvalue(), target_date)
+                    for uploaded_query in query_file
+                ]
+                query = pl.concat(query_frames, how="vertical_relaxed")
                 grouped: dict[int, list[pl.DataFrame]] = {}
                 metadata: dict[int, tuple[str, str]] = {}
 
