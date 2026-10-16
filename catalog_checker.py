@@ -308,21 +308,25 @@ def build_attribute_workbook(
 
     records: list[dict[str, object]] = []
     seen_records: set[tuple[str, str]] = set()
-    c_codes_by_file: dict[int, list[str]] = {}
+    c_codes_by_period: dict[tuple[str, ...], list[str]] = {}
     for item in selections:
-        name = str(item["region"])
-        match = re.search(r"(?i)\b(C\d+)\b", name)
+        name = str(item.get("output_sheet", "")) + " " + str(item["file_name"])
+        match = re.search(r"(?i)(?<![A-Z0-9])(C\d+)(?!\d)", name)
         if match:
-            c_codes_by_file.setdefault(int(item["file_index"]), []).append(match.group(1).upper())
+            period = tuple(re.findall(r"\d{1,2}\.\d{1,2}\.\d{4}", name))
+            if period:
+                c_codes_by_period.setdefault(period, []).append(match.group(1).upper())
 
     for item in selections:
         sheet_name = str(item["region"])
-        file_index = int(item["file_index"])
-        flyer = re.search(r"(?i)flyer", sheet_name)
-        code_match = re.search(r"(?i)\b(C\d+|BF\d+)\b", sheet_name)
+        output_sheet = str(item.get("output_sheet", ""))
+        source_name = output_sheet + " " + str(item["file_name"])
+        flyer = re.search(r"(?i)flyer", source_name)
+        code_match = re.search(r"(?i)(?<![A-Z0-9])(C\d+|BF\d+)(?!\d)", source_name)
         attribute_code = code_match.group(1).upper() if code_match else ""
         if flyer:
-            mapped = list(dict.fromkeys(c_codes_by_file.get(file_index, [])))
+            period = tuple(re.findall(r"\d{1,2}\.\d{1,2}\.\d{4}", source_name))
+            mapped = list(dict.fromkeys(c_codes_by_period.get(period, []))) if period else []
             attribute_code = mapped[0] if len(mapped) == 1 else ""
 
         raw = pl.read_excel(
@@ -341,7 +345,7 @@ def build_attribute_workbook(
                 continue
             seen_records.add(record_key)
             records.append({
-                "NO.": len(records) + 1, "ACTION": "",
+                "NO.": len(records) + 1, "ACTION": 0,
                 "GOLD CODE": row["GOLD CODE"], "SV": row["SV"],
                 "CLASS CODE": "CATALOG", "ATTRIBUTE CODE": attribute_code,
                 "ALPHA. NUM": "", "NUM. VALUE": "", "DATETIME": "",
