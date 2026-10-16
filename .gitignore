@@ -17,6 +17,7 @@ dist/
 *.egg
 *.whl
 *.spec
+!CatalogPriceChecker.spec
 
 # Test, coverage, lint, and type-checker caches
 .cache/

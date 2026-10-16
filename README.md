@@ -2,12 +2,45 @@
 
 Webapp nhỏ để đối chiếu giá trong các file catalogue với file query giá theo một ngày chỉ định.
 
+Ứng dụng có thể chạy trực tiếp bằng Python hoặc được đóng gói thành ứng dụng Windows local. Khi chạy bản Windows, dữ liệu Excel chỉ được xử lý trong bộ nhớ trên máy người dùng và không được gửi lên Streamlit Cloud hay API bên ngoài.
+
 ## Chạy ứng dụng
 
 ```powershell
 uv sync
 uv run streamlit run app.py
 ```
+
+## Đóng gói ứng dụng Windows
+
+Yêu cầu máy build là Windows 64-bit và đã cài `uv`. Chạy:
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
+File chạy được tạo tại:
+
+```text
+dist\CatalogPriceChecker\CatalogPriceChecker.exe
+```
+
+PyInstaller tạo bản `onedir`. Script build tự tạo gói phân phối:
+
+```text
+dist\CatalogPriceChecker-windows-x64.zip
+```
+
+Gửi file ZIP này cho người dùng, không gửi riêng file `.exe` vì ứng dụng cần các DLL/runtime trong thư mục `_internal`.
+
+## Sử dụng bản Windows
+
+1. Giải nén thư mục được nhận.
+2. Double-click `CatalogPriceChecker.exe`.
+3. Ứng dụng tự chọn một cổng trống từ `8501` đến `8599` và mở trình duyệt tại `http://127.0.0.1:<port>`.
+4. Giữ cửa sổ console trong khi sử dụng. Đóng cửa sổ này để dừng ứng dụng và giải phóng cổng.
+
+Ứng dụng chỉ lắng nghe trên địa chỉ loopback `127.0.0.1`, vì vậy máy khác trong mạng không thể truy cập. App không cần internet sau khi đã được đóng gói. Mỗi file upload được giới hạn ở 20 MB và phải là workbook XLSX hợp lệ.
 
 ## Luồng sử dụng
 

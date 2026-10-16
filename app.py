@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 
 import polars as pl
 import streamlit as st
 
 from catalog_checker import (
     build_result_zip,
+    build_attribute_workbook,
     compare_with_query,
     derive_output_sheet_name,
     read_catalog_sheet,
     read_effective_query,
+    WorkbookValidationError,
     workbook_sheet_info,
 )
 
@@ -22,6 +25,8 @@ OPTIONAL_FILE_SLOTS = [
     ("Price Cata", False),
     ("Price Comple", False),
 ]
+MAX_UPLOAD_MB = 20
+logger = logging.getLogger("catalog-price-checker")
 
 
 st.set_page_config(page_title="Catalog Price Checker", page_icon="📋", layout="wide")
@@ -62,12 +67,17 @@ def inspect_workbook(file_bytes: bytes):
     return workbook_sheet_info(file_bytes)
 
 
-query_file = st.file_uploader("1. Chọn file query giá", type=["xlsx"])
+query_file = st.file_uploader(
+    "1. Chọn file query giá",
+    type=["xlsx"],
+    max_upload_size=MAX_UPLOAD_MB,
+)
 target_date = st.date_input("2. Ngày kiểm tra", value=date.today(), format="DD/MM/YYYY")
 catalog_files = st.file_uploader(
     "3. Chọn các file catalogue",
     type=["xlsx"],
     accept_multiple_files=True,
+    max_upload_size=MAX_UPLOAD_MB,
 )
 
 selections: list[dict[str, object]] = []
@@ -77,8 +87,16 @@ if catalog_files:
         file_bytes = uploaded_file.getvalue()
         try:
             sheet_info = inspect_workbook(file_bytes)
-        except Exception as error:
+        except WorkbookValidationError as error:
+            logger.warning("Rejected workbook %s: %s", uploaded_file.name, error)
             st.error(f"Không đọc được {uploaded_file.name}: {error}")
+            continue
+        except Exception:
+            logger.exception("Could not inspect workbook %s", uploaded_file.name)
+            st.error(
+                f"Không đọc được {uploaded_file.name}. "
+                "Hãy kiểm tra file có đúng định dạng XLSX."
+            )
             continue
 
         header_rows = {item["name"]: item["header_row"] for item in sheet_info}
@@ -155,6 +173,7 @@ for slot_name, use_dept in OPTIONAL_FILE_SLOTS:
         uploaded_add_file = st.file_uploader(
             f"Chọn file {slot_name}",
             type=["xlsx"],
+            max_upload_size=MAX_UPLOAD_MB,
             key=f"additional_{slot_name}",
             label_visibility="collapsed",
         )
@@ -165,6 +184,39 @@ for slot_name, use_dept in OPTIONAL_FILE_SLOTS:
 st.caption(
     "Không bắt buộc chọn. 6922_Vynamic dùng DEPT; các file còn lại dùng DIVISION."
 )
+
+st.subheader("7. Tạo file Attribute")
+attribute_start, attribute_end = st.columns(2)
+with attribute_start:
+    attribute_start_date = st.date_input(
+        "START DATE", value=date.today(), format="DD/MM/YYYY", key="attribute_start_date"
+    )
+with attribute_end:
+    attribute_end_date = st.date_input(
+        "END DATE", value=date.today(), format="DD/MM/YYYY", key="attribute_end_date"
+    )
+can_create_attribute = bool(selections)
+if st.button(
+    "Tạo attribute", disabled=not can_create_attribute,
+    help="Chỉ cần chọn file catalogue và sheet hợp lệ.",
+):
+    try:
+        attribute_bytes = build_attribute_workbook(
+            selections, attribute_start_date, attribute_end_date
+        )
+        st.download_button(
+            "Tải file Attribute",
+            data=attribute_bytes,
+            file_name=f"Attribute_{attribute_start_date:%Y%m%d}_{attribute_end_date:%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+        st.success("Đã tạo file Attribute. Các ô ATTRIBUTE CODE chưa nhận diện được để trống để bạn nhập.")
+    except (WorkbookValidationError, ValueError) as error:
+        st.error(str(error))
+    except Exception:
+        logger.exception("Could not create attribute workbook")
+        st.error("Không thể tạo file Attribute do lỗi không mong muốn.")
 
 can_process = query_file is not None and bool(selections)
 if st.button("Xử lý và tạo file kết quả", type="primary", disabled=not can_process):
@@ -232,5 +284,12 @@ if st.button("Xử lý và tạo file kết quả", type="primary", disabled=not
                 mime="application/zip",
                 type="primary",
             )
-        except Exception as error:
-            st.exception(error)
+        except (WorkbookValidationError, ValueError) as error:
+            logger.warning("Workbook validation or data error: %s", error)
+            st.error(str(error))
+        except Exception:
+            logger.exception("Unexpected error while processing workbooks")
+            st.error(
+                "Không thể xử lý file do lỗi không mong muốn. "
+                "Chi tiết kỹ thuật đã được ghi trong cửa sổ ứng dụng."
+            )

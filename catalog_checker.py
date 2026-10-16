@@ -5,7 +5,7 @@ from io import BytesIO
 from pathlib import Path
 import re
 import unicodedata
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 import polars as pl
 from openpyxl import Workbook, load_workbook
@@ -69,6 +69,42 @@ QUERY_COLUMNS = {
 }
 
 BUSINESS_GROUPS = ("NON FOOD", "FMCG", "FRESH", "OTHERS")
+MAX_XLSX_BYTES = 20 * 1024 * 1024
+MAX_XLSX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
+MAX_XLSX_ENTRY_BYTES = 100 * 1024 * 1024
+MAX_XLSX_ENTRIES = 10_000
+REQUIRED_XLSX_MEMBERS = {"[Content_Types].xml", "xl/workbook.xml"}
+
+
+class WorkbookValidationError(ValueError):
+    """Raised when an uploaded workbook is unsafe or is not a valid XLSX file."""
+
+
+def validate_xlsx(file_bytes: bytes) -> None:
+    """Validate an XLSX container without extracting it to disk."""
+    if not file_bytes:
+        raise WorkbookValidationError("File XLSX đang trống.")
+    if len(file_bytes) > MAX_XLSX_BYTES:
+        raise WorkbookValidationError("File XLSX vượt quá giới hạn 20 MB.")
+
+    try:
+        with ZipFile(BytesIO(file_bytes)) as archive:
+            members = archive.infolist()
+            member_names = {member.filename for member in members}
+            if not REQUIRED_XLSX_MEMBERS.issubset(member_names):
+                raise WorkbookValidationError("File không có cấu trúc workbook XLSX hợp lệ.")
+            if len(members) > MAX_XLSX_ENTRIES:
+                raise WorkbookValidationError("File XLSX chứa quá nhiều thành phần.")
+            if any(member.flag_bits & 0x1 for member in members):
+                raise WorkbookValidationError("Không hỗ trợ file XLSX được mã hóa.")
+            if any(member.file_size > MAX_XLSX_ENTRY_BYTES for member in members):
+                raise WorkbookValidationError("File XLSX có thành phần giải nén quá lớn.")
+            if sum(member.file_size for member in members) > MAX_XLSX_UNCOMPRESSED_BYTES:
+                raise WorkbookValidationError("Kích thước giải nén của file XLSX quá lớn.")
+    except WorkbookValidationError:
+        raise
+    except (BadZipFile, OSError, ValueError) as error:
+        raise WorkbookValidationError("File không phải workbook XLSX hợp lệ.") from error
 
 
 def normalize_header(value: object) -> str:
@@ -79,6 +115,17 @@ def normalize_header(value: object) -> str:
     normalized = re.sub(r"[^\w\s%]", "", normalized)
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized.strip().upper()
+
+
+def _unique_normalized_column_mapping(columns: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for column in columns:
+        base = normalize_header(column) or "COLUMN"
+        counts[base] = counts.get(base, 0) + 1
+        suffix = counts[base]
+        mapping[column] = base if suffix == 1 else f"{base} {suffix}"
+    return mapping
 
 
 def parse_target_date(value: date | datetime | str) -> date:
@@ -95,6 +142,7 @@ def parse_target_date(value: date | datetime | str) -> date:
 
 
 def workbook_sheet_info(file_bytes: bytes) -> list[dict[str, object]]:
+    validate_xlsx(file_bytes)
     workbook = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
     result = []
     try:
@@ -113,8 +161,13 @@ def workbook_sheet_info(file_bytes: bytes) -> list[dict[str, object]]:
 
 
 def _find_header_row_in_worksheet(worksheet, max_rows: int = 20) -> int | None:
+    worksheet_max_row = worksheet.max_row or max_rows
     for row_index, row in enumerate(
-        worksheet.iter_rows(min_row=1, max_row=min(max_rows, worksheet.max_row), values_only=True)
+        worksheet.iter_rows(
+            min_row=1,
+            max_row=min(max_rows, worksheet_max_row),
+            values_only=True,
+        )
     ):
         values = {normalize_header(value) for value in row if value is not None}
         if HEADER_COLUMNS.issubset(values):
@@ -186,6 +239,7 @@ def read_catalog_sheet(
     suggest_site: str,
     header_row: int | None = None,
 ) -> pl.DataFrame:
+    validate_xlsx(file_bytes)
     if header_row is None:
         sheet_info = {item["name"]: item for item in workbook_sheet_info(file_bytes)}
         header_row = sheet_info.get(sheet_name, {}).get("header_row")
@@ -198,7 +252,7 @@ def read_catalog_sheet(
         infer_schema_length=0,
         read_options={"header_row": header_row},
     )
-    dataframe = dataframe.rename({column: normalize_header(column) for column in dataframe.columns})
+    dataframe = dataframe.rename(_unique_normalized_column_mapping(dataframe.columns))
     dataframe = _catalog_column_mapping(dataframe)
     site = str(suggest_site).strip()
     if not site:
@@ -234,7 +288,87 @@ def read_catalog_sheet(
     )
 
 
+ATTRIBUTE_COLUMNS = [
+    "NO.", "ACTION", "GOLD CODE", "SV", "CLASS CODE", "ATTRIBUTE CODE",
+    "ALPHA. NUM", "NUM. VALUE", "DATETIME", "START DATE", "END DATE",
+]
+
+
+def build_attribute_workbook(
+    selections: list[dict[str, object]], start_date: date | datetime | str,
+    end_date: date | datetime | str,
+) -> bytes:
+    """Create an editable attribute workbook from the selected catalogue sheets."""
+    from openpyxl.utils import get_column_letter
+
+    start_date = parse_target_date(start_date)
+    end_date = parse_target_date(end_date)
+    if end_date < start_date:
+        raise ValueError("END DATE không được sớm hơn START DATE.")
+
+    records: list[dict[str, object]] = []
+    seen_records: set[tuple[str, str]] = set()
+    c_codes_by_file: dict[int, list[str]] = {}
+    for item in selections:
+        name = str(item["region"])
+        match = re.search(r"(?i)\b(C\d+)\b", name)
+        if match:
+            c_codes_by_file.setdefault(int(item["file_index"]), []).append(match.group(1).upper())
+
+    for item in selections:
+        sheet_name = str(item["region"])
+        file_index = int(item["file_index"])
+        flyer = re.search(r"(?i)flyer", sheet_name)
+        code_match = re.search(r"(?i)\b(C\d+|BF\d+)\b", sheet_name)
+        attribute_code = code_match.group(1).upper() if code_match else ""
+        if flyer:
+            mapped = list(dict.fromkeys(c_codes_by_file.get(file_index, [])))
+            attribute_code = mapped[0] if len(mapped) == 1 else ""
+
+        raw = pl.read_excel(
+            BytesIO(item["file_bytes"]), sheet_name=sheet_name, infer_schema_length=0,
+            read_options={"header_row": int(item["header_row"])},
+        )
+        raw = raw.rename(_unique_normalized_column_mapping(raw.columns))
+        raw = _catalog_column_mapping(raw)
+        values = raw.select(_identifier("GOLD CODE"), _identifier("SV")).filter(
+            pl.col("GOLD CODE").is_not_null() & (pl.col("GOLD CODE") != "")
+            & pl.col("SV").is_not_null() & (pl.col("SV") != "")
+        )
+        for row in values.iter_rows(named=True):
+            record_key = (row["GOLD CODE"], row["SV"])
+            if record_key in seen_records:
+                continue
+            seen_records.add(record_key)
+            records.append({
+                "NO.": len(records) + 1, "ACTION": "",
+                "GOLD CODE": row["GOLD CODE"], "SV": row["SV"],
+                "CLASS CODE": "CATALOG", "ATTRIBUTE CODE": attribute_code,
+                "ALPHA. NUM": "", "NUM. VALUE": "", "DATETIME": "",
+                "START DATE": start_date, "END DATE": end_date,
+            })
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Attribute"
+    sheet.append(ATTRIBUTE_COLUMNS)
+    for record in records:
+        sheet.append([record[column] for column in ATTRIBUTE_COLUMNS])
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for column_index, column_name in enumerate(ATTRIBUTE_COLUMNS, 1):
+        width = max(14, len(column_name) + 2)
+        sheet.column_dimensions[get_column_letter(column_index)].width = width
+        if column_name in {"START DATE", "END DATE"}:
+            for cell in sheet[get_column_letter(column_index)][1:]:
+                cell.number_format = "DD/MM/YYYY"
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 def read_effective_query(file_bytes: bytes, target_date: date | datetime | str) -> pl.DataFrame:
+    validate_xlsx(file_bytes)
     target_date = parse_target_date(target_date)
     query = pl.read_excel(BytesIO(file_bytes), infer_schema_length=0)
     missing = sorted(QUERY_COLUMNS.difference(query.columns))
@@ -409,7 +543,7 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
         worksheet = workbook.create_sheet(_safe_sheet_name(requested_name, used_names))
         worksheet.sheet_view.showGridLines = False
         worksheet.freeze_panes = "A2"
-        worksheet.append(dataframe.columns)
+        worksheet.append([_safe_excel_value(column) for column in dataframe.columns])
         for cell in worksheet[1]:
             fill_color, font_color = _header_colors(str(cell.value))
             cell.fill = PatternFill("solid", fgColor=fill_color)
@@ -429,7 +563,7 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
 
         widths = [len(str(column)) for column in dataframe.columns]
         for row in dataframe.iter_rows():
-            worksheet.append(row)
+            worksheet.append([_safe_excel_value(value) for value in row])
             for index, value in enumerate(row):
                 if value is not None:
                     widths[index] = min(max(widths[index], len(str(value))), 40)
@@ -484,6 +618,13 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
     return output.getvalue()
 
 
+def _safe_excel_value(value: object) -> object:
+    """Prevent text cells from being interpreted as formulas by Excel."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def _header_colors(column_name: str) -> tuple[str, str]:
     if column_name.startswith("QUERY "):
         return "48ACD3", "FFFFFF"
@@ -521,6 +662,7 @@ def _header_colors(column_name: str) -> tuple[str, str]:
 
 
 def _read_add_workbook(file_bytes: bytes) -> dict[str, pl.DataFrame]:
+    validate_xlsx(file_bytes)
     sheets = pl.read_excel(BytesIO(file_bytes), sheet_id=0, infer_schema_length=0)
     return sheets if isinstance(sheets, dict) else {"Sheet": sheets}
 
