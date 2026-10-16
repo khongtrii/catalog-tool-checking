@@ -212,6 +212,10 @@ def _identifier(column: str) -> pl.Expr:
     )
 
 
+def _gold_code(column: str) -> pl.Expr:
+    return _identifier(column).str.zfill(8)
+
+
 def _price(column: str) -> pl.Expr:
     return (
         pl.col(column)
@@ -259,7 +263,7 @@ def read_catalog_sheet(
         raise ValueError(f"REGION '{sheet_name}' chưa có SUGGEST SITE.")
 
     dataframe = dataframe.with_columns(
-        _identifier("GOLD CODE"),
+        _gold_code("GOLD CODE"),
         _identifier("SV"),
         _price("NORMAL SELLING PRICE VND"),
         _price("PROMOTIONAL SELLING PRICE VND"),
@@ -322,7 +326,7 @@ def build_attribute_workbook(
         output_sheet = str(item.get("output_sheet", ""))
         source_name = output_sheet + " " + str(item["file_name"])
         flyer = re.search(r"(?i)flyer", source_name)
-        code_match = re.search(r"(?i)(?<![A-Z0-9])(C\d+|BF\d+)(?!\d)", source_name)
+        code_match = re.search(r"(?i)(?<![A-Z0-9])(C\d+|BF\d+|M\d+)(?!\d)", source_name)
         attribute_code = code_match.group(1).upper() if code_match else ""
         if flyer:
             period = tuple(re.findall(r"\d{1,2}\.\d{1,2}\.\d{4}", source_name))
@@ -335,7 +339,7 @@ def build_attribute_workbook(
         )
         raw = raw.rename(_unique_normalized_column_mapping(raw.columns))
         raw = _catalog_column_mapping(raw)
-        values = raw.select(_identifier("GOLD CODE"), _identifier("SV")).filter(
+        values = raw.select(_gold_code("GOLD CODE"), _identifier("SV")).filter(
             pl.col("GOLD CODE").is_not_null() & (pl.col("GOLD CODE") != "")
             & pl.col("SV").is_not_null() & (pl.col("SV") != "")
         )
@@ -380,7 +384,7 @@ def read_effective_query(file_bytes: bytes, target_date: date | datetime | str) 
         raise ValueError("File query thiếu cột: " + ", ".join(missing))
 
     query = query.filter(pl.col("DIVISION") != "DIVISION").with_columns(
-        _identifier("GOLD_CODE"),
+        _gold_code("GOLD_CODE"),
         _identifier("SV"),
         _identifier("CH"),
         _identifier("PRICELIST_NORMAL"),
