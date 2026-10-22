@@ -69,6 +69,12 @@ QUERY_COLUMNS = {
 }
 
 BUSINESS_GROUPS = ("NON FOOD", "FMCG", "FRESH", "OTHERS")
+VLL_DEPT_CODES = (
+    "110", "120", "160", "210", "220", "230", "240", "250", "260",
+    "270", "310", "320", "330", "340", "350", "360", "410", "420",
+    "430", "440", "610", "620", "630", "640", "650", "450", "460",
+    "470", "480", "510", "520", "530", "540", "550", "580",
+)
 MAX_XLSX_BYTES = 20 * 1024 * 1024
 MAX_XLSX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 MAX_XLSX_ENTRY_BYTES = 100 * 1024 * 1024
@@ -294,7 +300,7 @@ def read_catalog_sheet(
 
 ATTRIBUTE_COLUMNS = [
     "NO.", "ACTION", "GOLD CODE", "SV", "CLASS CODE", "ATTRIBUTE CODE",
-    "ALPHA. NUM", "NUM. VALUE", "DATETIME", "START DATE", "END DATE",
+    "ALPHA. NUM", "NUM. VALUE", "DATE", "TIME", "START DATE", "END DATE",
 ]
 
 
@@ -352,7 +358,7 @@ def build_attribute_workbook(
                 "NO.": len(records) + 1, "ACTION": 0,
                 "GOLD CODE": row["GOLD CODE"], "SV": row["SV"],
                 "CLASS CODE": "CATALOG", "ATTRIBUTE CODE": attribute_code,
-                "ALPHA. NUM": "", "NUM. VALUE": "", "DATETIME": "",
+                "ALPHA. NUM": "", "NUM. VALUE": "", "DATE": "", "TIME": "",
                 "START DATE": start_date, "END DATE": end_date,
             })
 
@@ -361,15 +367,14 @@ def build_attribute_workbook(
     sheet.title = "Attribute"
     sheet.append(ATTRIBUTE_COLUMNS)
     for record in records:
-        sheet.append([record[column] for column in ATTRIBUTE_COLUMNS])
+        sheet.append([_excel_text(record[column]) for column in ATTRIBUTE_COLUMNS])
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for column_index, column_name in enumerate(ATTRIBUTE_COLUMNS, 1):
         width = max(14, len(column_name) + 2)
         sheet.column_dimensions[get_column_letter(column_index)].width = width
-        if column_name in {"START DATE", "END DATE"}:
-            for cell in sheet[get_column_letter(column_index)][1:]:
-                cell.number_format = "DD/MM/YYYY"
+        for cell in sheet[get_column_letter(column_index)]:
+            cell.number_format = "@"
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -553,6 +558,8 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
         worksheet.freeze_panes = "A2"
         worksheet.append([_safe_excel_value(column) for column in dataframe.columns])
         for cell in worksheet[1]:
+            cell.number_format = "@"
+        for cell in worksheet[1]:
             fill_color, font_color = _header_colors(str(cell.value))
             cell.fill = PatternFill("solid", fgColor=fill_color)
             cell.font = Font(
@@ -578,6 +585,7 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
 
         for row in worksheet.iter_rows(min_row=2):
             for cell in row:
+                cell.number_format = "@"
                 cell.font = body_font
                 cell.alignment = Alignment(vertical="center")
         for index, width in enumerate(widths, start=1):
@@ -598,29 +606,6 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
             ].width = target_width
 
         worksheet.auto_filter.ref = worksheet.dimensions
-        for column_name in ("FINAL PRICE", "QUERY FINAL PRICE"):
-            if column_name in dataframe.columns:
-                column_index = dataframe.columns.index(column_name) + 1
-                for cell in worksheet.iter_cols(
-                    min_col=column_index,
-                    max_col=column_index,
-                    min_row=2,
-                    max_row=worksheet.max_row,
-                ):
-                    for item in cell:
-                        item.number_format = "#,##0"
-        for column_name in ("QUERY VALID START DATE", "QUERY VALID END DATE"):
-            if column_name in dataframe.columns:
-                column_index = dataframe.columns.index(column_name) + 1
-                for cells in worksheet.iter_cols(
-                    min_col=column_index,
-                    max_col=column_index,
-                    min_row=2,
-                    max_row=worksheet.max_row,
-                ):
-                    for item in cells:
-                        item.number_format = "dd/mm/yyyy"
-
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -628,9 +613,21 @@ def results_to_excel(results: list[tuple[str, pl.DataFrame]]) -> bytes:
 
 def _safe_excel_value(value: object) -> object:
     """Prevent text cells from being interpreted as formulas by Excel."""
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
-        return "'" + value
-    return value
+    return _excel_text(value)
+
+
+def _excel_text(value: object) -> str:
+    """Serialize every exported value as text while keeping dates readable."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%d/%m/%Y %H:%M:%S")
+    if isinstance(value, date):
+        return value.strftime("%d/%m/%Y")
+    text = str(value)
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
 
 
 def _header_colors(column_name: str) -> tuple[str, str]:
@@ -719,6 +716,18 @@ def build_result_zip(
 
             for sheet_name, dataframe in source_sheets.items():
                 primary_column = "DEPT" if use_dept else "DIVISION"
+                if use_dept and "SZDISCOUNTID" in dataframe.columns:
+                    dept_pattern = (
+                        r"(?i)(?<![A-Z0-9])(?:0?(?:"
+                        + "|".join(VLL_DEPT_CODES)
+                        + r"))(?![A-Z0-9])"
+                    )
+                    dataframe = dataframe.with_columns(
+                        pl.col("SZDISCOUNTID")
+                        .cast(pl.String)
+                        .str.extract(dept_pattern, 0)
+                        .alias("DEPT")
+                    )
                 for group, subset in split_by_business_group(
                     dataframe, primary_column
                 ).items():
