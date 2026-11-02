@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import logging
+from pathlib import Path
+import subprocess
 
 import polars as pl
 import streamlit as st
@@ -29,6 +31,23 @@ MAX_UPLOAD_MB = 20
 logger = logging.getLogger("catalog-price-checker")
 
 
+def get_last_update() -> str:
+    """Return the latest commit time, with the deployed file time as a fallback."""
+    try:
+        completed = subprocess.run(
+            ["git", "log", "-1", "--format=%cI"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=2,
+        )
+        updated_at = datetime.fromisoformat(completed.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        updated_at = datetime.fromtimestamp(Path(__file__).stat().st_mtime)
+    return updated_at.strftime("%d/%m/%Y %H:%M")
+
+
 st.set_page_config(page_title="Catalog Price Checker", page_icon="📋", layout="wide")
 st.markdown(
     """
@@ -54,8 +73,34 @@ st.markdown(
     [data-testid="stDataFrame"] {
         font-size: 1rem;
     }
+    .last-update-badge {
+        position: fixed;
+        top: 0.8rem;
+        right: 4.5rem;
+        z-index: 999999;
+        padding: 0.35rem 0.7rem;
+        border: 1px solid rgba(128, 128, 128, 0.3);
+        border-radius: 0.5rem;
+        background: var(--background-color);
+        color: var(--text-color);
+        font-size: 0.82rem;
+        line-height: 1.2;
+        white-space: nowrap;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    }
+    @media (max-width: 640px) {
+        .last-update-badge {
+            position: static;
+            display: inline-block;
+            margin-bottom: 0.75rem;
+        }
+    }
     </style>
     """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    f'<div class="last-update-badge">Cập nhật: {get_last_update()}</div>',
     unsafe_allow_html=True,
 )
 st.title("Catalog Price Checker")

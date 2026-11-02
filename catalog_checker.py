@@ -718,14 +718,14 @@ def build_result_zip(
                 primary_column = "DEPT" if use_dept else "DIVISION"
                 if use_dept and "SZDISCOUNTID" in dataframe.columns:
                     dept_pattern = (
-                        r"(?i)(?<![A-Z0-9])(?:0?(?:"
+                        r"(?i)(?:^|[^A-Z0-9])(0?(?:"
                         + "|".join(VLL_DEPT_CODES)
-                        + r"))(?![A-Z0-9])"
+                        + r"))(?:[^A-Z0-9]|$)"
                     )
                     dataframe = dataframe.with_columns(
                         pl.col("SZDISCOUNTID")
                         .cast(pl.String)
-                        .str.extract(dept_pattern, 0)
+                        .str.extract(dept_pattern, 1)
                         .alias("DEPT")
                     )
                 for group, subset in split_by_business_group(
